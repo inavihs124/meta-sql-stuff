@@ -1,3 +1,23 @@
+---
+
+title: SQL Query Optimizer OpenEnv
+emoji: 🗄️
+colorFrom: blue
+colorTo: green
+sdk: docker
+sdk_version: "latest"
+app_file: server.py
+pinned: false
+tags:
+
+* openenv
+* rl-environment
+* sql
+* code-optimization
+* reinforcement-learning
+
+---
+
 # SQL Query Optimizer — OpenEnv Environment
 
 ## Overview
@@ -172,4 +192,5 @@ sql-query-optimizer/
     ├── task_definitions.py
     └── graders.py
 ```
+
 

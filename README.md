@@ -117,6 +117,20 @@ This creates a **dense reward signal**, allowing agents to improve gradually ins
 | GET    | `/state`  | View the current environment state |
 
 ---
+## OpenEnv Compliance
+
+This environment follows the OpenEnv specification:
+
+- Implements `reset()`, `step()`, and `state()` endpoints  
+- Uses typed Pydantic models for Observation, Action, and Reward  
+- Includes `openenv.yaml` metadata  
+- Provides deterministic graders with scores in [0,1]  
+- Supports reproducible evaluation via the inference script  
+
+The API can be tested live at:
+https://shivanims-meta-sql-stuff.hf.space/docs
+
+---
 
 ## Quick Example
 

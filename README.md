@@ -9,12 +9,11 @@ sdk_version: "latest"
 app_file: server.py
 pinned: false
 tags:
-
-* openenv
-* rl-environment
-* sql
-* code-optimization
-* reinforcement-learning
+  - openenv
+  - rl-environment
+  - sql
+  - code-optimization
+  - reinforcement-learning
 
 ---
 

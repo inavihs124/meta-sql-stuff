@@ -1,0 +1,36 @@
+name: sql-query-optimizer
+version: "1.0.0"
+description: >
+  An RL environment where agents optimize slow SQL queries.
+  Given a schema and a poorly-written query, the agent rewrites it
+  to be correct, efficient, and readable. Graders measure semantic
+  equivalence, performance improvement, and style quality.
+author: openenv-submission
+tags:
+  - sql
+  - code-optimization
+  - real-world
+  - openenv
+tasks:
+  - id: easy_select_optimization
+    name: "Easy: Basic SELECT Optimization"
+    difficulty: easy
+  - id: medium_join_optimization
+    name: "Medium: JOIN & Subquery Optimization"
+    difficulty: medium
+  - id: hard_complex_optimization
+    name: "Hard: Complex Multi-table Optimization"
+    difficulty: hard
+action_space:
+  type: text
+  description: "A rewritten SQL query string"
+observation_space:
+  type: object
+  fields:
+    - schema: "Database schema DDL"
+    - slow_query: "The original slow SQL query"
+    - task_description: "What the query should compute"
+    - sample_data: "Sample rows for context"
+    - hints: "Optional hints (easy task only)"
+reward_range: [0.0, 1.0]
+episode_steps: 1

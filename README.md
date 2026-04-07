@@ -1,4 +1,5 @@
 ---
+
 title: SQL Query Optimizer OpenEnv
 emoji: 🗄️
 colorFrom: blue
@@ -168,3 +169,4 @@ sql-query-optimizer/
     ├── task_definitions.py  # 3 tasks with schemas & slow queries
     └── graders.py           # Deterministic graders
 ```
+

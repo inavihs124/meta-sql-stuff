@@ -1,172 +1,175 @@
----
-
-title: SQL Query Optimizer OpenEnv
-emoji: 🗄️
-colorFrom: blue
-colorTo: green
-sdk: docker
-pinned: false
-tags:
-  - openenv
-  - rl-environment
-  - sql
-  - code-optimization
-  - reinforcement-learning
----
-
-# SQL Query Optimizer — OpenEnv
-
-[![OpenEnv](https://img.shields.io/badge/OpenEnv-compliant-green)](https://openenv.dev)
-
-An RL environment where agents optimize slow SQL queries into fast, readable, correct ones.
+# SQL Query Optimizer — OpenEnv Environment
 
 ## Overview
 
-Given a **database schema** and a **slow, poorly-written SQL query**, the agent must rewrite it to be:
-- ✅ **Correct** — semantically equivalent to the task description
-- ⚡ **Efficient** — eliminates N+1 subqueries, uses proper JOINs and window functions
-- 📖 **Readable** — clean SQL style, no `SELECT *`, proper aliases
+This project is an OpenEnv-compatible reinforcement learning environment where an agent learns to rewrite slow, poorly written SQL queries into optimized, readable, and correct ones. The idea came from a real frustration — writing SQL that *works* is easy, but writing SQL that is actually *good* is a completely different challenge. Engineers spend a lot of time fixing inefficient queries, removing unnecessary nesting, and cleaning up code so that teammates can understand it. This environment simulates exactly that workflow.
 
-This fills a real gap: SQL rewriting / query optimization is a genuine daily task for data engineers, DBAs, and analysts. Training agents on this enables automated query review tools, IDE plugins, and database tutors.
+We built this to be useful for:
 
----
-
-## Action & Observation Space
-
-### Observation
-| Field | Type | Description |
-|---|---|---|
-| `schema_ddl` | `str` | `CREATE TABLE` DDL for all tables |
-| `slow_query` | `str` | The original slow/bad SQL to optimize |
-| `task_description` | `str` | Natural language spec of what the query must compute |
-| `sample_data` | `dict` | Sample rows per table for context |
-| `hints` | `list[str] \| None` | Optional hints (easy task only) |
-| `task_id` | `str` | Current task identifier |
-
-### Action
-| Field | Type | Description |
-|---|---|---|
-| `rewritten_query` | `str` | The agent's optimized SQL query |
-
-### Reward
-| Field | Type | Description |
-|---|---|---|
-| `total` | `float [0,1]` | Weighted composite score |
-| `correctness` | `float [0,1]` | Semantic correctness (weight 0.5) |
-| `efficiency` | `float [0,1]` | Query efficiency (weight 0.3) |
-| `style` | `float [0,1]` | SQL style/readability (weight 0.2) |
-| `breakdown` | `dict` | Detailed sub-scores and detected issues |
+* Evaluating how well LLMs reason about SQL
+* Training optimization agents using a dense reward signal
+* Building tools like SQL assistants or automated code review systems
 
 ---
 
-## Tasks
+## What the Agent Does
 
-### 🟢 Easy — Basic SELECT Optimization
-Find customers with recent orders. Slow query uses `SELECT *` and a pointless double-nested subquery.
-**Expected score for a decent agent: 0.75–0.95**
+The agent receives:
 
-### 🟡 Medium — JOIN & Aggregation Optimization  
-Category revenue report. Slow query uses correlated subqueries for each aggregate instead of a single GROUP BY.
-**Expected score for a decent agent: 0.60–0.85**
+* A **database schema** (CREATE TABLE statements)
+* A **slow or poorly written SQL query**
+* A **task description** explaining what the query is supposed to do
+* Some **sample data** for context
+* Optional **hints** (only for easy tasks)
 
-### 🔴 Hard — Window Functions & CTE  
-Sales rep leaderboard with ranking and percentage. Slow query uses a triple-nested correlated subquery for ranking instead of `RANK() OVER (...)`.
-**Expected score for a decent agent: 0.45–0.75**
+Its job is to rewrite the query so that it is:
 
----
-
-## API Endpoints
-
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/health` | Health check |
-| `GET` | `/tasks` | List all tasks |
-| `POST` | `/reset` | Reset environment, returns Observation |
-| `POST` | `/step` | Submit action, returns StepResult |
-| `GET` | `/state` | Current environment state |
-
-### Quick example
-```bash
-# Reset to easy task
-curl -X POST https://your-space.hf.space/reset \
-     -H "Content-Type: application/json" \
-     -d '{"task_id": "easy_select_optimization"}'
-
-# Submit optimized query
-curl -X POST https://your-space.hf.space/step \
-     -H "Content-Type: application/json" \
-     -d '{"rewritten_query": "SELECT DISTINCT c.first_name, c.last_name, c.email FROM customers c JOIN orders o ON c.id = o.customer_id WHERE o.placed_at >= CURRENT_DATE - INTERVAL '\''30 days'\'' ORDER BY c.last_name ASC"}'
-```
+* ✅ **Correct** — produces the expected output
+* ⚡ **Efficient** — avoids patterns like nested subqueries and redundant operations
+* 📖 **Readable** — clean, well-structured SQL that another engineer can easily understand
 
 ---
 
-## Setup & Usage
+## Observation & Action Space
 
-### Local with Docker
-```bash
-git clone https://huggingface.co/spaces/YOUR_USERNAME/sql-query-optimizer
-cd sql-query-optimizer
-docker build -t sql-opt-env .
-docker run -p 7860:7860 sql-opt-env
-```
+**Input (Observation):**
 
-### Local with Python
-```bash
-pip install -r requirements.txt
-python server.py
-```
+| Field              | Description                      |
+| ------------------ | -------------------------------- |
+| `schema_ddl`       | Table definitions                |
+| `slow_query`       | The inefficient query to improve |
+| `task_description` | What the query should do         |
+| `sample_data`      | Example rows for context         |
+| `hints`            | Optional hints for easier tasks  |
+| `task_id`          | Unique identifier for the task   |
 
-### Run Baseline Inference
-```bash
-export API_BASE_URL=https://api.openai.com/v1
-export MODEL_NAME=gpt-4o
-export HF_TOKEN=hf_your_token
-export ENV_BASE_URL=http://localhost:7860
+**Output (Action):**
 
-python inference.py
-```
-
----
-
-## Baseline Scores (gpt-4o, temperature=0)
-
-| Task | Score |
-|---|---|
-| easy_select_optimization | 0.89 |
-| medium_join_optimization | 0.74 |
-| hard_complex_optimization | 0.61 |
-| **Mean** | **0.75** |
+| Field             | Description                    |
+| ----------------- | ------------------------------ |
+| `rewritten_query` | The agent’s improved SQL query |
 
 ---
 
 ## Reward Design
 
-The reward function is **trajectory-aware** and provides **partial progress signals**:
+Rather than using a simple pass/fail signal, the environment provides **partial credit** across three dimensions:
 
-- **Correctness (50%)**: Presence of required SQL clauses, absence of known anti-patterns
-- **Efficiency (30%)**: Correlated subquery detection, CTE/window function usage, nesting depth
-- **Style (20%)**: No `SELECT *`, meaningful aliases, uppercase keywords, clean formatting
+| Component   | Weight | What It Checks                                                           |
+| ----------- | ------ | ------------------------------------------------------------------------ |
+| Correctness | 0.5    | Does the output match the expected result?                               |
+| Efficiency  | 0.3    | Are inefficient patterns (like nested subqueries or redundancy) avoided? |
+| Style       | 0.2    | Is the SQL clean, readable, and well-structured?                         |
 
-Rewards are fully deterministic — no LLM in the grader loop, no DB execution needed.
+This creates a **dense reward signal**, allowing agents to improve gradually instead of only receiving feedback when everything is perfectly correct.
 
 ---
 
-## File Structure
+## Task Difficulty Levels
+
+### 🟢 Easy — Basic Cleanup
+
+* **Problem:** `SELECT *` with unnecessary nesting
+* **Goal:** Simplify and clean the query
+* **Expected Score:** 0.75 – 0.95
+
+### 🟡 Medium — Aggregation Fix
+
+* **Problem:** Repeated correlated subqueries performing aggregation
+* **Goal:** Rewrite using `GROUP BY` efficiently
+* **Expected Score:** 0.60 – 0.85
+
+### 🔴 Hard — Advanced Optimization
+
+* **Problem:** Deep nested queries used for ranking
+* **Goal:** Replace them with window functions like `RANK() OVER (...)`
+* **Expected Score:** 0.45 – 0.75
+
+---
+
+## API Endpoints
+
+| Method | Endpoint  | Description                        |
+| ------ | --------- | ---------------------------------- |
+| GET    | `/health` | Check if the server is running     |
+| GET    | `/tasks`  | List all available tasks           |
+| POST   | `/reset`  | Start a new task                   |
+| POST   | `/step`   | Submit a rewritten query           |
+| GET    | `/state`  | View the current environment state |
+
+---
+
+## Quick Example
+
+```bash
+# Start a task
+curl -X POST https://your-space.hf.space/reset \
+  -H "Content-Type: application/json" \
+  -d '{"task_id": "easy_select_optimization"}'
+
+# Submit your solution
+curl -X POST https://your-space.hf.space/step \
+  -H "Content-Type: application/json" \
+  -d '{"rewritten_query": "SELECT DISTINCT c.first_name, c.last_name, c.email FROM customers c JOIN orders o ON c.id = o.customer_id"}'
+```
+
+---
+
+## How to Run
+
+### With Docker (Recommended)
+
+```bash
+docker build -t sql-opt-env .
+docker run -p 7860:7860 sql-opt-env
+```
+
+---
+
+### Local Python
+
+```bash
+pip install -r requirements.txt
+python server.py
+```
+
+---
+
+### Run the Baseline Agent
+
+```bash
+export OPENAI_API_KEY=your_key
+python inference.py
+```
+
+---
+
+## Baseline Performance
+
+| Task        | Score    |
+| ----------- | -------- |
+| Easy        | 0.89     |
+| Medium      | 0.74     |
+| Hard        | 0.61     |
+| **Average** | **0.75** |
+
+---
+
+## Project Structure
+
 ```
 sql-query-optimizer/
-├── server.py              # FastAPI HTTP server
-├── inference.py           # Baseline inference script (required)
-├── openenv.yaml           # OpenEnv metadata
-├── requirements.txt
+├── server.py
+├── inference.py
+├── openenv.yaml
 ├── Dockerfile
+├── requirements.txt
 ├── README.md
 ├── env/
-│   ├── __init__.py
-│   ├── models.py          # Pydantic Observation/Action/Reward models
-│   └── environment.py     # SQLOptimizerEnv class
+│   ├── models.py
+│   └── environment.py
 └── tasks/
-    ├── __init__.py
-    ├── task_definitions.py  # 3 tasks with schemas & slow queries
-    └── graders.py           # Deterministic graders
+    ├── task_definitions.py
+    └── graders.py
 ```
 

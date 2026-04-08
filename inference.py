@@ -10,34 +10,18 @@ import os
 import sys
 import json
 import time
-import requests
 
-# ── Config ────────────────────────────────────────────────────────────────────
-API_BASE_URL = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME   = os.environ.get("MODEL_NAME", "gpt-4o")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")   # FIXED: was reading HF_TOKEN
-
-ENV_BASE_URL = os.environ.get("ENV_BASE_URL", "http://localhost:7860")
+# ── Config (all reads happen at top level — no imports that can fail here) ────
+API_BASE_URL   = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
+MODEL_NAME     = os.environ.get("MODEL_NAME", "gpt-4o")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+ENV_BASE_URL   = os.environ.get("ENV_BASE_URL", "http://localhost:7860")
 
 TASK_IDS = [
     "easy_select_optimization",
     "medium_join_optimization",
     "hard_complex_optimization",
 ]
-
-# ── HTTP helpers ──────────────────────────────────────────────────────────────
-
-def env_reset(task_id: str) -> dict:
-    r = requests.post(f"{ENV_BASE_URL}/reset", json={"task_id": task_id}, timeout=30)
-    r.raise_for_status()
-    return r.json()
-
-def env_step(rewritten_query: str) -> dict:
-    r = requests.post(f"{ENV_BASE_URL}/step", json={"rewritten_query": rewritten_query}, timeout=30)
-    r.raise_for_status()
-    return r.json()
-
-# ── Agent prompt ──────────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = """You are an expert SQL engineer.
 You will be given a database schema, a slow/poorly-written SQL query, and a task description.
@@ -47,6 +31,12 @@ Your job is to rewrite the query to be:
 3. READABLE — uppercase keywords, meaningful aliases, no SELECT *
 
 Respond with ONLY the rewritten SQL query, no explanation, no markdown fences."""
+
+
+def _emit(obj: dict):
+    """Print a JSON line to stdout and flush immediately."""
+    print(json.dumps(obj), flush=True)
+
 
 def build_user_prompt(obs: dict) -> str:
     hints_section = ""
@@ -61,18 +51,27 @@ def build_user_prompt(obs: dict) -> str:
             for row in rows[:3]:
                 sample_section += f"  {row}\n"
 
-    return f"""TASK: {obs['task_description']}
-
-SCHEMA:
-{obs['schema_ddl']}
-
-SLOW QUERY TO OPTIMIZE:
-{obs['slow_query']}{hints_section}{sample_section}
-
-Rewrite this query:"""
+    return (
+        f"TASK: {obs['task_description']}\n\n"
+        f"SCHEMA:\n{obs['schema_ddl']}\n\n"
+        f"SLOW QUERY TO OPTIMIZE:\n{obs['slow_query']}"
+        f"{hints_section}{sample_section}\n\nRewrite this query:"
+    )
 
 
-# ── Main inference loop ───────────────────────────────────────────────────────
+def env_reset(task_id: str) -> dict:
+    import requests
+    r = requests.post(f"{ENV_BASE_URL}/reset", json={"task_id": task_id}, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
+
+def env_step(rewritten_query: str) -> dict:
+    import requests
+    r = requests.post(f"{ENV_BASE_URL}/step", json={"rewritten_query": rewritten_query}, timeout=30)
+    r.raise_for_status()
+    return r.json()
+
 
 def run_task(client, task_id: str) -> dict:
     obs = env_reset(task_id)
@@ -92,83 +91,78 @@ def run_task(client, task_id: str) -> dict:
     rewritten_query = completion.choices[0].message.content.strip()
 
     result = env_step(rewritten_query)
-    reward = result["reward"]
-
     return {
-        "task_id": task_id,
+        "task_id":         task_id,
         "rewritten_query": rewritten_query,
-        "reward": reward,
-        "latency_s": latency,
+        "reward":          result["reward"],
+        "latency_s":       latency,
     }
 
 
 def main():
+    # ── [START] — emitted FIRST, before anything else can fail ───────────────
+    _emit({
+        "event":   "[START]",
+        "model":   MODEL_NAME,
+        "tasks":   TASK_IDS,
+        "env_url": ENV_BASE_URL,
+    })
+
     all_scores = []
 
-    # ── [START] ──────────────────────────────────────────────────────────────
-    print(json.dumps({
-        "event": "[START]",
-        "model": MODEL_NAME,
-        "tasks": TASK_IDS,
-        "env_url": ENV_BASE_URL,
-    }))
-    sys.stdout.flush()
-
-    # FIXED: OpenAI client created inside main(), inside try/except
-    # — never at module level, so import alone can't crash the validator
+    # ── Build OpenAI client (lazy import so the module always loads cleanly) ──
+    client = None
     try:
         from openai import OpenAI
-        api_key = OPENAI_API_KEY or "dummy-key-not-set"
-        client = OpenAI(base_url=API_BASE_URL, api_key=api_key)
+        client = OpenAI(
+            base_url=API_BASE_URL,
+            api_key=OPENAI_API_KEY if OPENAI_API_KEY else "dummy-not-set",
+        )
     except Exception as e:
-        print(json.dumps({"event": "[ERROR]", "stage": "client_init", "error": str(e)}))
-        sys.stdout.flush()
-        # Emit zero scores and exit cleanly — no unhandled exception
+        _emit({"event": "[ERROR]", "stage": "client_init", "error": str(e)})
         for task_id in TASK_IDS:
-            print(json.dumps({"event": "[STEP]", "task_id": task_id, "score": 0.0, "error": "client init failed"}))
-        print(json.dumps({"event": "[END]", "scores": {t: 0.0 for t in TASK_IDS}, "mean_score": 0.0, "model": MODEL_NAME}))
-        sys.stdout.flush()
-        sys.exit(0)   # exit 0 so the validator sees a clean process exit
+            _emit({"event": "[STEP]", "task_id": task_id, "score": 0.0,
+                   "error": f"client init failed: {e}"})
+            all_scores.append(0.0)
+        _emit({
+            "event":      "[END]",
+            "scores":     {t: 0.0 for t in TASK_IDS},
+            "mean_score": 0.0,
+            "model":      MODEL_NAME,
+        })
+        return  # clean return — no sys.exit, no unhandled exception
 
+    # ── Per-task loop ─────────────────────────────────────────────────────────
     for task_id in TASK_IDS:
         try:
             result = run_task(client, task_id)
-            score = result["reward"]["total"]
+            score  = result["reward"]["total"]
             all_scores.append(score)
-
-            # ── [STEP] ───────────────────────────────────────────────────────
-            print(json.dumps({
-                "event": "[STEP]",
-                "task_id": task_id,
-                "score": score,
-                "correctness": result["reward"]["correctness"],
-                "efficiency":  result["reward"]["efficiency"],
-                "style":       result["reward"]["style"],
-                "latency_s":   result["latency_s"],
-                "rewritten_query": result["rewritten_query"][:200] + "..." if len(result["rewritten_query"]) > 200 else result["rewritten_query"],
-            }))
-            sys.stdout.flush()
-
+            rq = result["rewritten_query"]
+            _emit({
+                "event":           "[STEP]",
+                "task_id":         task_id,
+                "score":           score,
+                "correctness":     result["reward"]["correctness"],
+                "efficiency":      result["reward"]["efficiency"],
+                "style":           result["reward"]["style"],
+                "latency_s":       result["latency_s"],
+                "rewritten_query": rq[:200] + "..." if len(rq) > 200 else rq,
+            })
         except Exception as e:
-            print(json.dumps({
-                "event": "[STEP]",
-                "task_id": task_id,
-                "score": 0.0,
-                "error": str(e),
-            }))
-            sys.stdout.flush()
             all_scores.append(0.0)
+            _emit({"event": "[STEP]", "task_id": task_id,
+                   "score": 0.0, "error": str(e)})
 
     mean_score = round(sum(all_scores) / len(all_scores), 4) if all_scores else 0.0
 
-    # ── [END] ────────────────────────────────────────────────────────────────
-    print(json.dumps({
-        "event": "[END]",
-        "scores": {tid: s for tid, s in zip(TASK_IDS, all_scores)},
+    # ── [END] — always emitted ────────────────────────────────────────────────
+    _emit({
+        "event":      "[END]",
+        "scores":     {tid: s for tid, s in zip(TASK_IDS, all_scores)},
         "mean_score": mean_score,
-        "model": MODEL_NAME,
-    }))
-    sys.stdout.flush()
+        "model":      MODEL_NAME,
+    })
 
 
 if __name__ == "__main__":

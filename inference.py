@@ -12,12 +12,10 @@ import json
 import time
 
 # ── Config ────────────────────────────────────────────────────────────────────
-# Validator injects API_KEY and API_BASE_URL — always use these, never hardcode.
-API_BASE_URL   = os.environ["API_BASE_URL"]
-MODEL_NAME     = os.environ.get("MODEL_NAME", "gpt-4o")
-# Accept both API_KEY (validator) and OPENAI_API_KEY (local dev), prefer API_KEY
-OPENAI_API_KEY = os.environ["API_KEY"]
-ENV_BASE_URL   = os.environ.get("ENV_BASE_URL", "http://localhost:7860")
+API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
+API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
+MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
+ENV_BASE_URL = os.getenv("ENV_BASE_URL", "http://localhost:7860")
 
 TASK_IDS = [
     "easy_select_optimization",
@@ -160,8 +158,8 @@ def main():
     try:
         from openai import OpenAI
         client = OpenAI(
-            base_url=os.environ["API_BASE_URL"],
-            api_key=os.environ["API_KEY"],
+            base_url=API_BASE_URL,
+            api_key=API_KEY,
         )
     except Exception as e:
         _emit({"event": "[ERROR]", "stage": "client_init", "error": str(e)})

@@ -34,7 +34,52 @@ Respond with ONLY the rewritten SQL query, no explanation, no markdown fences.""
 
 
 def _emit(obj: dict):
-    """Print a JSON line to stdout and flush immediately."""
+    """Print structured output to stdout and flush immediately.
+    The validator requires lines that START with the literal token:
+      [START] task=NAME
+      [STEP]  step=N reward=R
+      [END]   task=NAME score=S steps=N
+    Extra key=value pairs are appended on the same line.
+    A JSON detail line is also emitted afterwards for debugging.
+    """
+    event = obj.get("event", "")
+
+    if event == "[START]":
+        tasks_str = ",".join(obj.get("tasks", []))
+        print(f"[START] task={tasks_str} model={obj.get('model', '')} env_url={obj.get('env_url', '')}", flush=True)
+
+    elif event == "[STEP]":
+        task_id = obj.get("task_id", "unknown")
+        score   = obj.get("score", 0.0)
+        error   = obj.get("error", "")
+        step_num = obj.get("step", 1)
+        if error:
+            print(f"[STEP] step={step_num} task={task_id} reward={score} error={error}", flush=True)
+        else:
+            correctness = obj.get("correctness", "")
+            efficiency  = obj.get("efficiency", "")
+            style       = obj.get("style", "")
+            latency     = obj.get("latency_s", "")
+            print(
+                f"[STEP] step={step_num} task={task_id} reward={score} "
+                f"correctness={correctness} efficiency={efficiency} style={style} latency_s={latency}",
+                flush=True,
+            )
+
+    elif event == "[END]":
+        scores     = obj.get("scores", {})
+        mean_score = obj.get("mean_score", 0.0)
+        n_steps    = len(scores)
+        # Emit one [END] line per task (validator may expect per-task END),
+        # then a summary line.
+        for task_id, score in scores.items():
+            print(f"[END] task={task_id} score={score} steps=1", flush=True)
+        print(f"[END] task=ALL score={mean_score} steps={n_steps} model={obj.get('model', '')}", flush=True)
+
+    elif event == "[ERROR]":
+        print(f"[ERROR] stage={obj.get('stage','')} error={obj.get('error','')}", flush=True)
+
+    # Always also emit the raw JSON for debugging (after the structured line)
     print(json.dumps(obj), flush=True)
 
 
@@ -120,8 +165,8 @@ def main():
         )
     except Exception as e:
         _emit({"event": "[ERROR]", "stage": "client_init", "error": str(e)})
-        for task_id in TASK_IDS:
-            _emit({"event": "[STEP]", "task_id": task_id, "score": 0.0,
+        for i, task_id in enumerate(TASK_IDS, start=1):
+            _emit({"event": "[STEP]", "step": i, "task_id": task_id, "score": 0.0,
                    "error": f"client init failed: {e}"})
             all_scores.append(0.0)
         _emit({
@@ -133,7 +178,7 @@ def main():
         return  # clean return — no sys.exit, no unhandled exception
 
     # ── Per-task loop ─────────────────────────────────────────────────────────
-    for task_id in TASK_IDS:
+    for step_num, task_id in enumerate(TASK_IDS, start=1):
         try:
             result = run_task(client, task_id)
             score  = result["reward"]["total"]
@@ -141,6 +186,7 @@ def main():
             rq = result["rewritten_query"]
             _emit({
                 "event":           "[STEP]",
+                "step":            step_num,
                 "task_id":         task_id,
                 "score":           score,
                 "correctness":     result["reward"]["correctness"],
@@ -151,7 +197,7 @@ def main():
             })
         except Exception as e:
             all_scores.append(0.0)
-            _emit({"event": "[STEP]", "task_id": task_id,
+            _emit({"event": "[STEP]", "step": step_num, "task_id": task_id,
                    "score": 0.0, "error": str(e)})
 
     mean_score = round(sum(all_scores) / len(all_scores), 4) if all_scores else 0.0

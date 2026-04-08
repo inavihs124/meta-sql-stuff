@@ -1,20 +1,22 @@
 """
 inference.py — Baseline Inference Script for SQL Query Optimizer OpenEnv
-Reads: OPENAI_API_KEY, API_BASE_URL, MODEL_NAME, ENV_BASE_URL
+Reads: API_KEY, API_BASE_URL, MODEL_NAME, ENV_BASE_URL  (injected by validator)
 Emits structured stdout: [START], [STEP], [END] format (required by OpenEnv bootcamp)
 
 Usage:
-    OPENAI_API_KEY=sk-... MODEL_NAME=gpt-4o python inference.py
+    API_KEY=sk-... MODEL_NAME=gpt-4o python inference.py
 """
 import os
 import sys
 import json
 import time
 
-# ── Config (all reads happen at top level — no imports that can fail here) ────
+# ── Config ────────────────────────────────────────────────────────────────────
+# Validator injects API_KEY and API_BASE_URL — always use these, never hardcode.
 API_BASE_URL   = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME     = os.environ.get("MODEL_NAME", "gpt-4o")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+# Accept both API_KEY (validator) and OPENAI_API_KEY (local dev), prefer API_KEY
+OPENAI_API_KEY = os.environ.get("API_KEY") or os.environ.get("OPENAI_API_KEY", "")
 ENV_BASE_URL   = os.environ.get("ENV_BASE_URL", "http://localhost:7860")
 
 TASK_IDS = [
@@ -49,9 +51,9 @@ def _emit(obj: dict):
         print(f"[START] task={tasks_str} model={obj.get('model', '')} env_url={obj.get('env_url', '')}", flush=True)
 
     elif event == "[STEP]":
-        task_id = obj.get("task_id", "unknown")
-        score   = obj.get("score", 0.0)
-        error   = obj.get("error", "")
+        task_id  = obj.get("task_id", "unknown")
+        score    = obj.get("score", 0.0)
+        error    = obj.get("error", "")
         step_num = obj.get("step", 1)
         if error:
             print(f"[STEP] step={step_num} task={task_id} reward={score} error={error}", flush=True)
@@ -70,8 +72,6 @@ def _emit(obj: dict):
         scores     = obj.get("scores", {})
         mean_score = obj.get("mean_score", 0.0)
         n_steps    = len(scores)
-        # Emit one [END] line per task (validator may expect per-task END),
-        # then a summary line.
         for task_id, score in scores.items():
             print(f"[END] task={task_id} score={score} steps=1", flush=True)
         print(f"[END] task=ALL score={mean_score} steps={n_steps} model={obj.get('model', '')}", flush=True)
@@ -79,7 +79,7 @@ def _emit(obj: dict):
     elif event == "[ERROR]":
         print(f"[ERROR] stage={obj.get('stage','')} error={obj.get('error','')}", flush=True)
 
-    # Always also emit the raw JSON for debugging (after the structured line)
+    # Also emit raw JSON for debugging
     print(json.dumps(obj), flush=True)
 
 
@@ -155,7 +155,7 @@ def main():
 
     all_scores = []
 
-    # ── Build OpenAI client (lazy import so the module always loads cleanly) ──
+    # ── Build OpenAI client pointed at the validator's LiteLLM proxy ─────────
     client = None
     try:
         from openai import OpenAI
@@ -175,7 +175,7 @@ def main():
             "mean_score": 0.0,
             "model":      MODEL_NAME,
         })
-        return  # clean return — no sys.exit, no unhandled exception
+        return
 
     # ── Per-task loop ─────────────────────────────────────────────────────────
     for step_num, task_id in enumerate(TASK_IDS, start=1):

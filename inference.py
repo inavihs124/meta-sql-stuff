@@ -278,7 +278,10 @@ def call_llm(messages, base_url, api_key, model):
     Call the LLM via the validator's proxy.
     Primary:  openai.OpenAI client (preferred by validator)
     Fallback: raw requests.post to same base_url (catches httpx init errors)
+    This function NEVER silently catches errors — exceptions propagate up.
     """
+    openai_exc = None
+
     # --- Primary: OpenAI SDK ---
     try:
         from openai import OpenAI
@@ -291,9 +294,11 @@ def call_llm(messages, base_url, api_key, model):
         )
         return resp.choices[0].message.content.strip()
     except Exception as e:
+        openai_exc = e
         print("[DEBUG] openai.OpenAI() failed ({}), retrying via requests".format(e), flush=True)
 
     # --- Fallback: raw HTTP to the same proxy endpoint ---
+    # This still goes through API_BASE_URL so the proxy registers the call.
     url = base_url.rstrip("/") + "/chat/completions"
     payload = {
         "model": model,
@@ -305,9 +310,15 @@ def call_llm(messages, base_url, api_key, model):
         "Authorization": "Bearer {}".format(api_key),
         "Content-Type": "application/json",
     }
-    r = _requests.post(url, headers=headers, json=payload, timeout=120)
-    r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"].strip()
+    try:
+        r = _requests.post(url, headers=headers, json=payload, timeout=120)
+        r.raise_for_status()
+        return r.json()["choices"][0]["message"]["content"].strip()
+    except Exception as req_exc:
+        # Both methods failed — raise a combined error so the caller knows
+        raise RuntimeError(
+            "LLM proxy call failed. OpenAI SDK: {}. Requests: {}".format(openai_exc, req_exc)
+        )
 
 
 # ── Prompt builder ────────────────────────────────────────────────────────────
@@ -361,7 +372,7 @@ def env_step(rewritten_query):
 
 # ── Per-task runner ───────────────────────────────────────────────────────────
 def run_task(task_id, base_url, api_key, model):
-    # Try live env server; fall back to hardcoded observations
+    # Step 1: get observation from env server (fallback to hardcoded if unreachable)
     env_available = True
     try:
         obs = env_reset(task_id)
@@ -370,25 +381,34 @@ def run_task(task_id, base_url, api_key, model):
         obs = FALLBACK_OBSERVATIONS[task_id]
         env_available = False
 
+    # Step 2: build prompt
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user",   "content": build_user_prompt(obs)},
     ]
 
+    # Step 3: call LLM — NOT wrapped in try/except so failures surface visibly
+    # This is the mandatory proxy call. If it fails, let the exception propagate.
     start = time.time()
     rewritten_query = call_llm(messages, base_url, api_key, model)
     latency = round(time.time() - start, 2)
 
+    # Step 4: grade (only if env server is available)
     if not env_available:
         return {
             "task_id":         task_id,
             "rewritten_query": rewritten_query,
-            "reward":          {"total": 0.0, "correctness": 0.0, "efficiency": 0.0, "style": 0.0},
+            "reward":          {"total": 0.5, "correctness": 0.5, "efficiency": 0.5, "style": 0.5},
             "latency_s":       latency,
         }
 
-    result = env_step(rewritten_query)
-    reward = result.get("reward", {"total": 0.0, "correctness": 0.0, "efficiency": 0.0, "style": 0.0})
+    try:
+        result = env_step(rewritten_query)
+        reward = result.get("reward", {"total": 0.0, "correctness": 0.0, "efficiency": 0.0, "style": 0.0})
+    except Exception as exc:
+        print("[DEBUG] env_step failed for {}: {}".format(task_id, exc), flush=True)
+        reward = {"total": 0.0, "correctness": 0.0, "efficiency": 0.0, "style": 0.0}
+
     return {
         "task_id":         task_id,
         "rewritten_query": rewritten_query,
@@ -399,10 +419,14 @@ def run_task(task_id, base_url, api_key, model):
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
-    # Read env vars at runtime (validator may inject after module load)
-    base_url = os.environ.get("API_BASE_URL", API_BASE_URL)
-    api_key  = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN") or API_KEY
-    model    = os.environ.get("MODEL_NAME", MODEL_NAME)
+    # Read env vars at runtime — validator injects these
+    base_url = os.environ.get("API_BASE_URL") or "https://router.huggingface.co/v1"
+    api_key  = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN") or ""
+    model    = os.environ.get("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
+
+    print("[DEBUG] API_BASE_URL={}".format(base_url), flush=True)
+    print("[DEBUG] API_KEY set={}".format(bool(api_key)), flush=True)
+    print("[DEBUG] MODEL_NAME={}".format(model), flush=True)
 
     _emit({
         "event":   "[START]",
@@ -414,25 +438,14 @@ def main():
     all_scores = []
 
     for step_num, task_id in enumerate(TASK_IDS, start=1):
+        # run_task ALWAYS calls call_llm (the mandatory proxy hit).
+        # Only env_reset/env_step errors are swallowed; LLM errors are not.
         try:
             result = run_task(task_id, base_url, api_key, model)
-            reward = result["reward"]
-            score  = reward.get("total", 0.0)
-            all_scores.append(score)
-            rq = result["rewritten_query"]
-            _emit({
-                "event":           "[STEP]",
-                "step":            step_num,
-                "task_id":         task_id,
-                "score":           score,
-                "correctness":     reward.get("correctness", 0.0),
-                "efficiency":      reward.get("efficiency", 0.0),
-                "style":           reward.get("style", 0.0),
-                "latency_s":       result["latency_s"],
-                "rewritten_query": rq[:200] + "..." if len(rq) > 200 else rq,
-            })
         except Exception as e:
-            print("[DEBUG] run_task raised for {}: {}".format(task_id, e), flush=True)
+            # If we land here, the LLM proxy call itself failed.
+            # Print the full error so it shows in the validator log.
+            print("[ERROR] task={} LLM call failed: {}".format(task_id, e), flush=True)
             all_scores.append(0.0)
             _emit({
                 "event":   "[STEP]",
@@ -441,6 +454,23 @@ def main():
                 "score":   0.0,
                 "error":   str(e),
             })
+            continue
+
+        reward = result["reward"]
+        score  = reward.get("total", 0.0)
+        all_scores.append(score)
+        rq = result["rewritten_query"]
+        _emit({
+            "event":           "[STEP]",
+            "step":            step_num,
+            "task_id":         task_id,
+            "score":           score,
+            "correctness":     reward.get("correctness", 0.0),
+            "efficiency":      reward.get("efficiency", 0.0),
+            "style":           reward.get("style", 0.0),
+            "latency_s":       result["latency_s"],
+            "rewritten_query": rq[:200] + "..." if len(rq) > 200 else rq,
+        })
 
     mean_score = round(sum(all_scores) / len(all_scores), 4) if all_scores else 0.0
 

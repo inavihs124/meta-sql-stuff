@@ -15,13 +15,60 @@ import time
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY")
 API_BASE_URL = os.getenv("API_BASE_URL") or "https://router.huggingface.co/v1"
 MODEL_NAME = os.getenv("MODEL_NAME") or "Qwen/Qwen2.5-72B-Instruct"
-ENV_BASE_URL = os.getenv("ENV_BASE_URL", "http://localhost:7860")
+ENV_BASE_URL = os.getenv("ENV_BASE_URL", "https://shivanims-meta-sql-stuff.hf.space")
 
 TASK_IDS = [
     "easy_select_optimization",
     "medium_join_optimization",
     "hard_complex_optimization",
 ]
+
+FALLBACK_OBSERVATIONS = {
+    "easy_select_optimization": {
+        "task_description": "Return the full name and email of all customers who placed at least one order in the last 30 days. Order results by last name ascending.",
+        "schema_ddl": "CREATE TABLE customers (\n    id          INTEGER PRIMARY KEY,\n    first_name  TEXT NOT NULL,\n    last_name   TEXT NOT NULL,\n    email       TEXT NOT NULL UNIQUE,\n    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n);\n\nCREATE TABLE orders (\n    id          INTEGER PRIMARY KEY,\n    customer_id INTEGER NOT NULL REFERENCES customers(id),\n    total       NUMERIC(10,2) NOT NULL,\n    placed_at   TIMESTAMP NOT NULL\n);",
+        "slow_query": "SELECT * FROM customers\nWHERE id IN (\n    SELECT customer_id FROM (\n        SELECT * FROM orders\n    ) AS all_orders\n    WHERE all_orders.placed_at >= CURRENT_DATE - INTERVAL '30 days'\n);",
+        "hints": [
+            "Use a JOIN instead of a nested subquery",
+            "Select only first_name, last_name, email — not SELECT *",
+            "Use DISTINCT to avoid duplicate customers",
+            "Add ORDER BY last_name ASC",
+        ],
+        "sample_data": {
+            "customers": [
+                {"id": 1, "first_name": "Alice", "last_name": "Smith", "email": "alice@example.com"},
+                {"id": 2, "first_name": "Bob",   "last_name": "Jones", "email": "bob@example.com"},
+                {"id": 3, "first_name": "Carol",  "last_name": "Adams", "email": "carol@example.com"},
+            ],
+            "orders": [
+                {"id": 1, "customer_id": 1, "total": 99.99,  "placed_at": "2025-03-25 10:00:00"},
+                {"id": 2, "customer_id": 2, "total": 149.50, "placed_at": "2024-01-01 08:00:00"},
+            ]
+        }
+    },
+    "medium_join_optimization": {
+        "task_description": "For each product category, return the category name, total revenue (sum of quantity * unit_price for completed orders), and the number of distinct products sold. Only include categories with total revenue above $500. Order by total revenue descending.",
+        "schema_ddl": "CREATE TABLE categories (\n    id    INTEGER PRIMARY KEY,\n    name  TEXT NOT NULL\n);\n\nCREATE TABLE products (\n    id          INTEGER PRIMARY KEY,\n    category_id INTEGER NOT NULL REFERENCES categories(id),\n    name        TEXT NOT NULL,\n    unit_price  NUMERIC(10,2) NOT NULL\n);\n\nCREATE TABLE orders (\n    id         INTEGER PRIMARY KEY,\n    status     TEXT NOT NULL,   -- 'pending','completed','cancelled'\n    placed_at  TIMESTAMP NOT NULL\n);\n\nCREATE TABLE order_items (\n    id         INTEGER PRIMARY KEY,\n    order_id   INTEGER NOT NULL REFERENCES orders(id),\n    product_id INTEGER NOT NULL REFERENCES products(id),\n    quantity   INTEGER NOT NULL\n);",
+        "slow_query": "SELECT\n    c.name,\n    (SELECT SUM(oi.quantity * p2.unit_price)\n     FROM order_items oi\n     JOIN products p2 ON oi.product_id = p2.id\n     JOIN orders o2   ON oi.order_id   = o2.id\n     WHERE p2.category_id = c.id AND o2.status = 'completed') AS total_revenue,\n    (SELECT COUNT(DISTINCT oi2.product_id)\n     FROM order_items oi2\n     JOIN products p3 ON oi2.product_id = p3.id\n     JOIN orders o3   ON oi2.order_id   = o3.id\n     WHERE p3.category_id = c.id AND o3.status = 'completed') AS distinct_products\nFROM categories c\nORDER BY total_revenue DESC;",
+        "hints": None,
+        "sample_data": {
+            "categories": [{"id": 1, "name": "Electronics"}, {"id": 2, "name": "Books"}, {"id": 3, "name": "Clothing"}],
+            "products": [{"id": 1, "category_id": 1, "name": "Laptop", "unit_price": 999.99}, {"id": 2, "category_id": 1, "name": "Phone", "unit_price": 699.99}, {"id": 3, "category_id": 2, "name": "Novel", "unit_price": 14.99}, {"id": 4, "category_id": 3, "name": "T-Shirt", "unit_price": 29.99}],
+            "orders": [{"id": 1, "status": "completed", "placed_at": "2025-03-01"}, {"id": 2, "status": "cancelled", "placed_at": "2025-03-05"}],
+            "order_items": [{"id": 1, "order_id": 1, "product_id": 1, "quantity": 2}, {"id": 2, "order_id": 1, "product_id": 3, "quantity": 5}, {"id": 3, "order_id": 2, "product_id": 4, "quantity": 3}]
+        }
+    },
+    "hard_complex_optimization": {
+        "task_description": "For each sales representative, compute: their name, total sales amount for the current calendar year, their rank among all reps by total sales (1 = highest), and the percentage their sales represent of the top performer's sales. Include reps with zero sales. Order by rank ascending.",
+        "schema_ddl": "CREATE TABLE reps (\n    id         INTEGER PRIMARY KEY,\n    name       TEXT NOT NULL,\n    region     TEXT NOT NULL,\n    hired_at   DATE NOT NULL\n);\n\nCREATE TABLE deals (\n    id          INTEGER PRIMARY KEY,\n    rep_id      INTEGER NOT NULL REFERENCES reps(id),\n    amount      NUMERIC(12,2) NOT NULL,\n    closed_at   DATE NOT NULL,\n    status      TEXT NOT NULL   -- 'won','lost','open'\n);",
+        "slow_query": "SELECT\n    r.name,\n    (SELECT COALESCE(SUM(d.amount), 0)\n     FROM deals d\n     WHERE d.rep_id = r.id\n       AND d.status = 'won'\n       AND EXTRACT(YEAR FROM d.closed_at) = EXTRACT(YEAR FROM CURRENT_DATE)) AS total_sales,\n    (SELECT COUNT(*) + 1\n     FROM reps r2\n     WHERE (SELECT COALESCE(SUM(d2.amount), 0)\n            FROM deals d2\n            WHERE d2.rep_id = r2.id\n              AND d2.status = 'won'\n              AND EXTRACT(YEAR FROM d2.closed_at) = EXTRACT(YEAR FROM CURRENT_DATE))\n           >\n           (SELECT COALESCE(SUM(d3.amount), 0)\n            FROM deals d3\n            WHERE d3.rep_id = r.id\n              AND d3.status = 'won'\n              AND EXTRACT(YEAR FROM d3.closed_at) = EXTRACT(YEAR FROM CURRENT_DATE))\n    ) AS rank\nFROM reps r\nORDER BY rank ASC;",
+        "hints": None,
+        "sample_data": {
+            "reps": [{"id": 1, "name": "Diana Prince", "region": "West", "hired_at": "2020-01-15"}, {"id": 2, "name": "Bruce Wayne", "region": "East", "hired_at": "2019-06-01"}, {"id": 3, "name": "Clark Kent", "region": "North", "hired_at": "2021-03-10"}, {"id": 4, "name": "Lois Lane", "region": "South", "hired_at": "2022-08-22"}],
+            "deals": [{"id": 1, "rep_id": 1, "amount": 50000.00, "closed_at": "2025-02-14", "status": "won"}, {"id": 2, "rep_id": 1, "amount": 30000.00, "closed_at": "2025-03-01", "status": "won"}, {"id": 3, "rep_id": 2, "amount": 90000.00, "closed_at": "2025-01-20", "status": "won"}, {"id": 4, "rep_id": 3, "amount": 20000.00, "closed_at": "2024-12-15", "status": "won"}, {"id": 5, "rep_id": 3, "amount": 15000.00, "closed_at": "2025-02-28", "status": "lost"}]
+        }
+    }
+}
 
 SYSTEM_PROMPT = """You are an expert SQL engineer.
 You will be given a database schema, a slow/poorly-written SQL query, and a task description.
@@ -117,7 +164,13 @@ def env_step(rewritten_query: str) -> dict:
 
 
 def run_task(client, task_id: str) -> dict:
-    obs = env_reset(task_id)
+    env_available = True
+    try:
+        obs = env_reset(task_id)
+    except Exception:
+        obs = FALLBACK_OBSERVATIONS[task_id]
+        env_available = False
+
     user_prompt = build_user_prompt(obs)
     start = time.time()
 
@@ -132,6 +185,14 @@ def run_task(client, task_id: str) -> dict:
     )
     latency = round(time.time() - start, 2)
     rewritten_query = completion.choices[0].message.content.strip()
+
+    if not env_available:
+        return {
+            "task_id":         task_id,
+            "rewritten_query": rewritten_query,
+            "reward":          {"total": 0.0, "correctness": 0.0, "efficiency": 0.0, "style": 0.0},
+            "latency_s":       latency,
+        }
 
     result = env_step(rewritten_query)
     return {

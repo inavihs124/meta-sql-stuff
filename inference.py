@@ -5,27 +5,21 @@ MANDATORY (validator requirements):
   - Uses os.environ["API_BASE_URL"] and os.environ["API_KEY"] directly
   - OpenAI client initialized with base_url=os.environ["API_BASE_URL"]
     and api_key=os.environ["API_KEY"]
+  - Falls back to raw requests if httpx/openai init fails (same proxy URL)
   - Emits [START] / [STEP] / [END] structured stdout
-  - MODEL_NAME read from os.environ["MODEL_NAME"]
 """
 import os
 import sys
 import json
 import time
+import requests as _requests
 
-# ── Config (validator injects these; fallbacks are for local testing only) ────
+# ── Config ────────────────────────────────────────────────────────────────────
+# Validator injects API_BASE_URL and API_KEY; fallbacks only for local testing
 API_BASE_URL = os.environ.get("API_BASE_URL", "https://router.huggingface.co/v1")
-API_KEY      = os.environ.get("API_KEY", os.environ.get("HF_TOKEN", ""))
+API_KEY      = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN", "")
 MODEL_NAME   = os.environ.get("MODEL_NAME", "Qwen/Qwen2.5-72B-Instruct")
 ENV_BASE_URL = os.environ.get("ENV_BASE_URL", "https://shivanims-meta-sql-stuff.hf.space")
-
-# Fail-fast guard: if API_BASE_URL or API_KEY are missing, print a clear error
-if not API_BASE_URL:
-    print("[ERROR] API_BASE_URL environment variable is not set.", flush=True)
-    sys.exit(1)
-if not API_KEY:
-    print("[ERROR] API_KEY environment variable is not set.", flush=True)
-    sys.exit(1)
 
 TASK_IDS = [
     "easy_select_optimization",
@@ -33,39 +27,40 @@ TASK_IDS = [
     "hard_complex_optimization",
 ]
 
-# ── Hardcoded task observations (fallback when env server unreachable) ────────
+# ── Hardcoded fallback observations (when env server is unreachable) ──────────
 FALLBACK_OBSERVATIONS = {
     "easy_select_optimization": {
         "task_description": (
             "Return the full name and email of all customers who placed at least one "
             "order in the last 30 days. Order results by last name ascending."
         ),
-        "schema_ddl": """\
-CREATE TABLE customers (
-    id          INTEGER PRIMARY KEY,
-    first_name  TEXT NOT NULL,
-    last_name   TEXT NOT NULL,
-    email       TEXT NOT NULL UNIQUE,
-    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE orders (
-    id          INTEGER PRIMARY KEY,
-    customer_id INTEGER NOT NULL REFERENCES customers(id),
-    total       NUMERIC(10,2) NOT NULL,
-    placed_at   TIMESTAMP NOT NULL
-);""",
-        "slow_query": """\
-SELECT * FROM customers
-WHERE id IN (
-    SELECT customer_id FROM (
-        SELECT * FROM orders
-    ) AS all_orders
-    WHERE all_orders.placed_at >= CURRENT_DATE - INTERVAL '30 days'
-);""",
+        "schema_ddl": (
+            "CREATE TABLE customers (\n"
+            "    id          INTEGER PRIMARY KEY,\n"
+            "    first_name  TEXT NOT NULL,\n"
+            "    last_name   TEXT NOT NULL,\n"
+            "    email       TEXT NOT NULL UNIQUE,\n"
+            "    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP\n"
+            ");\n\n"
+            "CREATE TABLE orders (\n"
+            "    id          INTEGER PRIMARY KEY,\n"
+            "    customer_id INTEGER NOT NULL REFERENCES customers(id),\n"
+            "    total       NUMERIC(10,2) NOT NULL,\n"
+            "    placed_at   TIMESTAMP NOT NULL\n"
+            ");"
+        ),
+        "slow_query": (
+            "SELECT * FROM customers\n"
+            "WHERE id IN (\n"
+            "    SELECT customer_id FROM (\n"
+            "        SELECT * FROM orders\n"
+            "    ) AS all_orders\n"
+            "    WHERE all_orders.placed_at >= CURRENT_DATE - INTERVAL '30 days'\n"
+            ");"
+        ),
         "hints": [
             "Use a JOIN instead of a nested subquery",
-            "Select only first_name, last_name, email — not SELECT *",
+            "Select only first_name, last_name, email - not SELECT *",
             "Use DISTINCT to avoid duplicate customers",
             "Add ORDER BY last_name ASC",
         ],
@@ -88,46 +83,45 @@ WHERE id IN (
             "products sold. Only include categories with total revenue above $500. "
             "Order by total revenue descending."
         ),
-        "schema_ddl": """\
-CREATE TABLE categories (
-    id    INTEGER PRIMARY KEY,
-    name  TEXT NOT NULL
-);
-
-CREATE TABLE products (
-    id          INTEGER PRIMARY KEY,
-    category_id INTEGER NOT NULL REFERENCES categories(id),
-    name        TEXT NOT NULL,
-    unit_price  NUMERIC(10,2) NOT NULL
-);
-
-CREATE TABLE orders (
-    id         INTEGER PRIMARY KEY,
-    status     TEXT NOT NULL,
-    placed_at  TIMESTAMP NOT NULL
-);
-
-CREATE TABLE order_items (
-    id         INTEGER PRIMARY KEY,
-    order_id   INTEGER NOT NULL REFERENCES orders(id),
-    product_id INTEGER NOT NULL REFERENCES products(id),
-    quantity   INTEGER NOT NULL
-);""",
-        "slow_query": """\
-SELECT
-    c.name,
-    (SELECT SUM(oi.quantity * p2.unit_price)
-     FROM order_items oi
-     JOIN products p2 ON oi.product_id = p2.id
-     JOIN orders o2   ON oi.order_id   = o2.id
-     WHERE p2.category_id = c.id AND o2.status = 'completed') AS total_revenue,
-    (SELECT COUNT(DISTINCT oi2.product_id)
-     FROM order_items oi2
-     JOIN products p3 ON oi2.product_id = p3.id
-     JOIN orders o3   ON oi2.order_id   = o3.id
-     WHERE p3.category_id = c.id AND o3.status = 'completed') AS distinct_products
-FROM categories c
-ORDER BY total_revenue DESC;""",
+        "schema_ddl": (
+            "CREATE TABLE categories (\n"
+            "    id    INTEGER PRIMARY KEY,\n"
+            "    name  TEXT NOT NULL\n"
+            ");\n\n"
+            "CREATE TABLE products (\n"
+            "    id          INTEGER PRIMARY KEY,\n"
+            "    category_id INTEGER NOT NULL REFERENCES categories(id),\n"
+            "    name        TEXT NOT NULL,\n"
+            "    unit_price  NUMERIC(10,2) NOT NULL\n"
+            ");\n\n"
+            "CREATE TABLE orders (\n"
+            "    id         INTEGER PRIMARY KEY,\n"
+            "    status     TEXT NOT NULL,\n"
+            "    placed_at  TIMESTAMP NOT NULL\n"
+            ");\n\n"
+            "CREATE TABLE order_items (\n"
+            "    id         INTEGER PRIMARY KEY,\n"
+            "    order_id   INTEGER NOT NULL REFERENCES orders(id),\n"
+            "    product_id INTEGER NOT NULL REFERENCES products(id),\n"
+            "    quantity   INTEGER NOT NULL\n"
+            ");"
+        ),
+        "slow_query": (
+            "SELECT\n"
+            "    c.name,\n"
+            "    (SELECT SUM(oi.quantity * p2.unit_price)\n"
+            "     FROM order_items oi\n"
+            "     JOIN products p2 ON oi.product_id = p2.id\n"
+            "     JOIN orders o2   ON oi.order_id   = o2.id\n"
+            "     WHERE p2.category_id = c.id AND o2.status = 'completed') AS total_revenue,\n"
+            "    (SELECT COUNT(DISTINCT oi2.product_id)\n"
+            "     FROM order_items oi2\n"
+            "     JOIN products p3 ON oi2.product_id = p3.id\n"
+            "     JOIN orders o3   ON oi2.order_id   = o3.id\n"
+            "     WHERE p3.category_id = c.id AND o3.status = 'completed') AS distinct_products\n"
+            "FROM categories c\n"
+            "ORDER BY total_revenue DESC;"
+        ),
         "hints": None,
         "sample_data": {
             "categories": [
@@ -136,10 +130,10 @@ ORDER BY total_revenue DESC;""",
                 {"id": 3, "name": "Clothing"},
             ],
             "products": [
-                {"id": 1, "category_id": 1, "name": "Laptop",   "unit_price": 999.99},
-                {"id": 2, "category_id": 1, "name": "Phone",    "unit_price": 699.99},
-                {"id": 3, "category_id": 2, "name": "Novel",    "unit_price": 14.99},
-                {"id": 4, "category_id": 3, "name": "T-Shirt",  "unit_price": 29.99},
+                {"id": 1, "category_id": 1, "name": "Laptop",  "unit_price": 999.99},
+                {"id": 2, "category_id": 1, "name": "Phone",   "unit_price": 699.99},
+                {"id": 3, "category_id": 2, "name": "Novel",   "unit_price": 14.99},
+                {"id": 4, "category_id": 3, "name": "T-Shirt", "unit_price": 29.99},
             ],
             "orders": [
                 {"id": 1, "status": "completed", "placed_at": "2025-03-01"},
@@ -159,45 +153,46 @@ ORDER BY total_revenue DESC;""",
             "and the percentage their sales represent of the top performer's sales. "
             "Include reps with zero sales. Order by rank ascending."
         ),
-        "schema_ddl": """\
-CREATE TABLE reps (
-    id         INTEGER PRIMARY KEY,
-    name       TEXT NOT NULL,
-    region     TEXT NOT NULL,
-    hired_at   DATE NOT NULL
-);
-
-CREATE TABLE deals (
-    id          INTEGER PRIMARY KEY,
-    rep_id      INTEGER NOT NULL REFERENCES reps(id),
-    amount      NUMERIC(12,2) NOT NULL,
-    closed_at   DATE NOT NULL,
-    status      TEXT NOT NULL
-);""",
-        "slow_query": """\
-SELECT
-    r.name,
-    (SELECT COALESCE(SUM(d.amount), 0)
-     FROM deals d
-     WHERE d.rep_id = r.id
-       AND d.status = 'won'
-       AND EXTRACT(YEAR FROM d.closed_at) = EXTRACT(YEAR FROM CURRENT_DATE)) AS total_sales,
-    (SELECT COUNT(*) + 1
-     FROM reps r2
-     WHERE (SELECT COALESCE(SUM(d2.amount), 0)
-            FROM deals d2
-            WHERE d2.rep_id = r2.id
-              AND d2.status = 'won'
-              AND EXTRACT(YEAR FROM d2.closed_at) = EXTRACT(YEAR FROM CURRENT_DATE))
-           >
-           (SELECT COALESCE(SUM(d3.amount), 0)
-            FROM deals d3
-            WHERE d3.rep_id = r.id
-              AND d3.status = 'won'
-              AND EXTRACT(YEAR FROM d3.closed_at) = EXTRACT(YEAR FROM CURRENT_DATE))
-    ) AS rank
-FROM reps r
-ORDER BY rank ASC;""",
+        "schema_ddl": (
+            "CREATE TABLE reps (\n"
+            "    id         INTEGER PRIMARY KEY,\n"
+            "    name       TEXT NOT NULL,\n"
+            "    region     TEXT NOT NULL,\n"
+            "    hired_at   DATE NOT NULL\n"
+            ");\n\n"
+            "CREATE TABLE deals (\n"
+            "    id          INTEGER PRIMARY KEY,\n"
+            "    rep_id      INTEGER NOT NULL REFERENCES reps(id),\n"
+            "    amount      NUMERIC(12,2) NOT NULL,\n"
+            "    closed_at   DATE NOT NULL,\n"
+            "    status      TEXT NOT NULL\n"
+            ");"
+        ),
+        "slow_query": (
+            "SELECT\n"
+            "    r.name,\n"
+            "    (SELECT COALESCE(SUM(d.amount), 0)\n"
+            "     FROM deals d\n"
+            "     WHERE d.rep_id = r.id\n"
+            "       AND d.status = 'won'\n"
+            "       AND EXTRACT(YEAR FROM d.closed_at) = EXTRACT(YEAR FROM CURRENT_DATE)) AS total_sales,\n"
+            "    (SELECT COUNT(*) + 1\n"
+            "     FROM reps r2\n"
+            "     WHERE (SELECT COALESCE(SUM(d2.amount), 0)\n"
+            "            FROM deals d2\n"
+            "            WHERE d2.rep_id = r2.id\n"
+            "              AND d2.status = 'won'\n"
+            "              AND EXTRACT(YEAR FROM d2.closed_at) = EXTRACT(YEAR FROM CURRENT_DATE))\n"
+            "           >\n"
+            "           (SELECT COALESCE(SUM(d3.amount), 0)\n"
+            "            FROM deals d3\n"
+            "            WHERE d3.rep_id = r.id\n"
+            "              AND d3.status = 'won'\n"
+            "              AND EXTRACT(YEAR FROM d3.closed_at) = EXTRACT(YEAR FROM CURRENT_DATE))\n"
+            "    ) AS rank\n"
+            "FROM reps r\n"
+            "ORDER BY rank ASC;"
+        ),
         "hints": None,
         "sample_data": {
             "reps": [
@@ -217,72 +212,136 @@ ORDER BY rank ASC;""",
     },
 }
 
-SYSTEM_PROMPT = """You are an expert SQL engineer.
-You will be given a database schema, a slow/poorly-written SQL query, and a task description.
-Your job is to rewrite the query to be:
-1. Semantically CORRECT — it must compute exactly what the task asks
-2. EFFICIENT — eliminate redundant subqueries, use proper JOINs, GROUP BY, window functions
-3. READABLE — uppercase keywords, meaningful aliases, no SELECT *
+SYSTEM_PROMPT = (
+    "You are an expert SQL engineer.\n"
+    "You will be given a database schema, a slow/poorly-written SQL query, and a task description.\n"
+    "Your job is to rewrite the query to be:\n"
+    "1. Semantically CORRECT - it must compute exactly what the task asks\n"
+    "2. EFFICIENT - eliminate redundant subqueries, use proper JOINs, GROUP BY, window functions\n"
+    "3. READABLE - uppercase keywords, meaningful aliases, no SELECT *\n\n"
+    "Respond with ONLY the rewritten SQL query, no explanation, no markdown fences."
+)
 
-Respond with ONLY the rewritten SQL query, no explanation, no markdown fences."""
 
-
-# ── Logging helpers ───────────────────────────────────────────────────────────
-def _emit(obj: dict):
+# ── Structured logging ────────────────────────────────────────────────────────
+def _emit(obj):
     event = obj.get("event", "")
-
     if event == "[START]":
         tasks_str = ",".join(obj.get("tasks", []))
         print(
-            f"[START] task={tasks_str} model={obj.get('model', '')} "
-            f"env_url={obj.get('env_url', '')}",
+            "[START] task={} model={} env_url={}".format(
+                tasks_str, obj.get("model", ""), obj.get("env_url", "")
+            ),
             flush=True,
         )
-
     elif event == "[STEP]":
         task_id  = obj.get("task_id", "unknown")
         score    = obj.get("score", 0.0)
         step_num = obj.get("step", 1)
         error    = obj.get("error", "")
         if error:
-            print(f"[STEP] step={step_num} task={task_id} reward={score} error={error}", flush=True)
-        else:
             print(
-                f"[STEP] step={step_num} task={task_id} reward={score} "
-                f"correctness={obj.get('correctness', '')} "
-                f"efficiency={obj.get('efficiency', '')} "
-                f"style={obj.get('style', '')} "
-                f"latency_s={obj.get('latency_s', '')}",
+                "[STEP] step={} task={} reward={} error={}".format(step_num, task_id, score, error),
                 flush=True,
             )
-
+        else:
+            print(
+                "[STEP] step={} task={} reward={} correctness={} efficiency={} style={} latency_s={}".format(
+                    step_num, task_id, score,
+                    obj.get("correctness", 0.0), obj.get("efficiency", 0.0),
+                    obj.get("style", 0.0), obj.get("latency_s", 0.0),
+                ),
+                flush=True,
+            )
     elif event == "[END]":
         scores     = obj.get("scores", {})
         mean_score = obj.get("mean_score", 0.0)
-        n_steps    = len(scores)
-        for task_id, score in scores.items():
-            print(f"[END] task={task_id} score={score} steps=1", flush=True)
+        for tid, sc in scores.items():
+            print("[END] task={} score={} steps=1".format(tid, sc), flush=True)
         print(
-            f"[END] task=ALL score={mean_score} steps={n_steps} "
-            f"model={obj.get('model', '')}",
+            "[END] task=ALL score={} steps={} model={}".format(
+                mean_score, len(scores), obj.get("model", "")
+            ),
             flush=True,
         )
-
     elif event == "[ERROR]":
         print(
-            f"[ERROR] stage={obj.get('stage', '')} error={obj.get('error', '')}",
+            "[ERROR] stage={} error={}".format(obj.get("stage", ""), obj.get("error", "")),
             flush=True,
         )
-
-    # Also emit raw JSON for debugging
     print(json.dumps(obj), flush=True)
 
 
+# ── LLM call (OpenAI client with requests fallback) ───────────────────────────
+def call_llm(messages, base_url, api_key, model):
+    """
+    Call the LLM via the validator's proxy.
+    Primary:  openai.OpenAI client (preferred by validator)
+    Fallback: raw requests.post to same base_url (catches httpx init errors)
+    """
+    # --- Primary: OpenAI SDK ---
+    try:
+        from openai import OpenAI
+        client = OpenAI(base_url=base_url, api_key=api_key)
+        resp = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.0,
+            max_tokens=1024,
+        )
+        return resp.choices[0].message.content.strip()
+    except Exception as e:
+        print("[DEBUG] openai.OpenAI() failed ({}), retrying via requests".format(e), flush=True)
+
+    # --- Fallback: raw HTTP to the same proxy endpoint ---
+    url = base_url.rstrip("/") + "/chat/completions"
+    payload = {
+        "model": model,
+        "messages": messages,
+        "temperature": 0.0,
+        "max_tokens": 1024,
+    }
+    headers = {
+        "Authorization": "Bearer {}".format(api_key),
+        "Content-Type": "application/json",
+    }
+    r = _requests.post(url, headers=headers, json=payload, timeout=120)
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"].strip()
+
+
+# ── Prompt builder ────────────────────────────────────────────────────────────
+def build_user_prompt(obs):
+    hints_section = ""
+    if obs.get("hints"):
+        hints_section = "\n\nHINTS:\n" + "\n".join("- {}".format(h) for h in obs["hints"])
+
+    sample_section = ""
+    if obs.get("sample_data"):
+        sample_section = "\n\nSAMPLE DATA:\n"
+        for table, rows in obs["sample_data"].items():
+            sample_section += "\n{}:\n".format(table)
+            for row in rows[:3]:
+                sample_section += "  {}\n".format(row)
+
+    return (
+        "TASK: {}\n\n"
+        "SCHEMA:\n{}\n\n"
+        "SLOW QUERY TO OPTIMIZE:\n{}"
+        "{}{}\n\nRewrite this query:"
+    ).format(
+        obs["task_description"],
+        obs["schema_ddl"],
+        obs["slow_query"],
+        hints_section,
+        sample_section,
+    )
+
+
 # ── Environment helpers ───────────────────────────────────────────────────────
-def env_reset(task_id: str) -> dict:
-    import requests
-    r = requests.post(
-        f"{ENV_BASE_URL}/reset",
+def env_reset(task_id):
+    r = _requests.post(
+        "{}/reset".format(ENV_BASE_URL),
         json={"task_id": task_id},
         timeout=30,
     )
@@ -290,10 +349,9 @@ def env_reset(task_id: str) -> dict:
     return r.json()
 
 
-def env_step(rewritten_query: str) -> dict:
-    import requests
-    r = requests.post(
-        f"{ENV_BASE_URL}/step",
+def env_step(rewritten_query):
+    r = _requests.post(
+        "{}/step".format(ENV_BASE_URL),
         json={"rewritten_query": rewritten_query},
         timeout=30,
     )
@@ -301,57 +359,27 @@ def env_step(rewritten_query: str) -> dict:
     return r.json()
 
 
-# ── Prompt builder ────────────────────────────────────────────────────────────
-def build_user_prompt(obs: dict) -> str:
-    hints_section = ""
-    if obs.get("hints"):
-        hints_section = "\n\nHINTS:\n" + "\n".join(f"- {h}" for h in obs["hints"])
-
-    sample_section = ""
-    if obs.get("sample_data"):
-        sample_section = "\n\nSAMPLE DATA:\n"
-        for table, rows in obs["sample_data"].items():
-            sample_section += f"\n{table}:\n"
-            for row in rows[:3]:
-                sample_section += f"  {row}\n"
-
-    return (
-        f"TASK: {obs['task_description']}\n\n"
-        f"SCHEMA:\n{obs['schema_ddl']}\n\n"
-        f"SLOW QUERY TO OPTIMIZE:\n{obs['slow_query']}"
-        f"{hints_section}{sample_section}\n\nRewrite this query:"
-    )
-
-
-# ── Core task runner ──────────────────────────────────────────────────────────
-def run_task(client, task_id: str) -> dict:
+# ── Per-task runner ───────────────────────────────────────────────────────────
+def run_task(task_id, base_url, api_key, model):
     # Try live env server; fall back to hardcoded observations
     env_available = True
     try:
         obs = env_reset(task_id)
     except Exception as exc:
-        print(f"[DEBUG] env_reset failed for {task_id}: {exc}", flush=True)
+        print("[DEBUG] env_reset failed for {}: {}".format(task_id, exc), flush=True)
         obs = FALLBACK_OBSERVATIONS[task_id]
         env_available = False
 
-    user_prompt = build_user_prompt(obs)
-    start = time.time()
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user",   "content": build_user_prompt(obs)},
+    ]
 
-    # ── THE MANDATORY LLM CALL via validator's proxy ──────────────────────────
-    completion = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": user_prompt},
-        ],
-        temperature=0.0,
-        max_tokens=1024,
-    )
+    start = time.time()
+    rewritten_query = call_llm(messages, base_url, api_key, model)
     latency = round(time.time() - start, 2)
-    rewritten_query = completion.choices[0].message.content.strip()
 
     if not env_available:
-        # LLM was called (proxy hit registered); grading returns 0 since no env
         return {
             "task_id":         task_id,
             "rewritten_query": rewritten_query,
@@ -371,29 +399,23 @@ def run_task(client, task_id: str) -> dict:
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main():
-    # [START] — always the very first line emitted
+    # Read env vars at runtime (validator may inject after module load)
+    base_url = os.environ.get("API_BASE_URL", API_BASE_URL)
+    api_key  = os.environ.get("API_KEY") or os.environ.get("HF_TOKEN") or API_KEY
+    model    = os.environ.get("MODEL_NAME", MODEL_NAME)
+
     _emit({
         "event":   "[START]",
-        "model":   MODEL_NAME,
+        "model":   model,
         "tasks":   TASK_IDS,
         "env_url": ENV_BASE_URL,
     })
 
-    all_scores: list[float] = []
+    all_scores = []
 
-    # Initialise OpenAI client exactly as the validator requires:
-    #   base_url = os.environ["API_BASE_URL"]
-    #   api_key  = os.environ["API_KEY"]
-    from openai import OpenAI
-    client = OpenAI(
-        base_url=os.environ.get("API_BASE_URL", API_BASE_URL),
-        api_key=os.environ.get("API_KEY", API_KEY),
-    )
-
-    # Per-task loop
     for step_num, task_id in enumerate(TASK_IDS, start=1):
         try:
-            result = run_task(client, task_id)
+            result = run_task(task_id, base_url, api_key, model)
             reward = result["reward"]
             score  = reward.get("total", 0.0)
             all_scores.append(score)
@@ -410,7 +432,7 @@ def main():
                 "rewritten_query": rq[:200] + "..." if len(rq) > 200 else rq,
             })
         except Exception as e:
-            print(f"[DEBUG] run_task raised for {task_id}: {e}", flush=True)
+            print("[DEBUG] run_task raised for {}: {}".format(task_id, e), flush=True)
             all_scores.append(0.0)
             _emit({
                 "event":   "[STEP]",
@@ -422,12 +444,11 @@ def main():
 
     mean_score = round(sum(all_scores) / len(all_scores), 4) if all_scores else 0.0
 
-    # [END] — always emitted
     _emit({
         "event":      "[END]",
         "scores":     {tid: s for tid, s in zip(TASK_IDS, all_scores)},
         "mean_score": mean_score,
-        "model":      MODEL_NAME,
+        "model":      model,
     })
 
 

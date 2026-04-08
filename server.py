@@ -139,9 +139,11 @@ def list_tasks():
     return {
         "tasks": [
             {
-                "id": tid,
-                "name": TASKS[tid]["task_description"][:60] + "...",
-                "difficulty": TASKS[tid]["difficulty"],
+                "id":           tid,
+                "name":         TASKS[tid]["task_description"][:60] + "...",
+                "difficulty":   TASKS[tid]["difficulty"],
+                "has_grader":   True,
+                "grader_type":  "programmatic",
             }
             for tid in TASK_ORDER
         ]

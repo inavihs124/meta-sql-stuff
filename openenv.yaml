@@ -20,12 +20,18 @@ tasks:
   - id: easy_select_optimization
     name: "Easy: Basic SELECT Optimization"
     difficulty: easy
+    grader: true
+    grader_type: programmatic
   - id: medium_join_optimization
     name: "Medium: JOIN & Subquery Optimization"
     difficulty: medium
+    grader: true
+    grader_type: programmatic
   - id: hard_complex_optimization
     name: "Hard: Complex Multi-table Optimization"
     difficulty: hard
+    grader: true
+    grader_type: programmatic
 action_space:
   type: text
   description: "A rewritten SQL query string"

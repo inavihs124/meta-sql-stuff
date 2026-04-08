@@ -13,7 +13,7 @@ import time
 
 # ── Config ────────────────────────────────────────────────────────────────────
 # Validator injects API_KEY and API_BASE_URL — always use these, never hardcode.
-API_BASE_URL   = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
+API_BASE_URL   = os.environ["API_BASE_URL"]
 MODEL_NAME     = os.environ.get("MODEL_NAME", "gpt-4o")
 # Accept both API_KEY (validator) and OPENAI_API_KEY (local dev), prefer API_KEY
 OPENAI_API_KEY = os.environ["API_KEY"]
@@ -160,8 +160,8 @@ def main():
     try:
         from openai import OpenAI
         client = OpenAI(
-            base_url=API_BASE_URL,
-            api_key=OPENAI_API_KEY,
+            base_url=os.environ["API_BASE_URL"],
+            api_key=os.environ["API_KEY"],
         )
     except Exception as e:
         _emit({"event": "[ERROR]", "stage": "client_init", "error": str(e)})

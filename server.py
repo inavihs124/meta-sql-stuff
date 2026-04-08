@@ -56,7 +56,7 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "env": "sql-query-optimizer", "version": "1.0.0"}  # CHANGED: "ok" → "healthy"
+    return {"status": "healthy", "env": "sql-query-optimizer", "version": "1.0.1"}
 
 
 # ── NEW: /metadata ────────────────────────────────────────────────────────────
@@ -69,7 +69,7 @@ def metadata():
             "Given a schema and a poorly-written query, the agent rewrites it "
             "to be correct, efficient, and readable."
         ),
-        "version": "1.0.0",
+        "version": "1.0.1",
         "tags": ["sql", "code-optimization", "real-world", "openenv"],
     }
 
@@ -139,11 +139,12 @@ def list_tasks():
     return {
         "tasks": [
             {
-                "id":           tid,
-                "name":         TASKS[tid]["task_description"][:60] + "...",
-                "difficulty":   TASKS[tid]["difficulty"],
-                "has_grader":   True,
-                "grader_type":  "programmatic",
+                "id":          tid,
+                "name":        TASKS[tid]["task_description"][:60] + "...",
+                "difficulty":  TASKS[tid]["difficulty"],
+                "has_grader":  True,
+                "grader":      True,
+                "grader_type": "programmatic",
             }
             for tid in TASK_ORDER
         ]

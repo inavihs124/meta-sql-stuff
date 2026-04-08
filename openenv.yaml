@@ -1,5 +1,10 @@
+spec_version: 1
 name: sql-query-optimizer
 version: "1.0.0"
+type: space
+runtime: fastapi
+app: server.app:app
+port: 7860
 description: >
   An RL environment where agents optimize slow SQL queries.
   Given a schema and a poorly-written query, the agent rewrites it

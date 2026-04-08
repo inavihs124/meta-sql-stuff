@@ -1,23 +1,17 @@
 """
 inference.py — Baseline Inference Script for SQL Query Optimizer OpenEnv
-Reads: API_KEY, API_BASE_URL, MODEL_NAME, ENV_BASE_URL  (injected by validator)
-Emits structured stdout: [START], [STEP], [END] format (required by OpenEnv bootcamp)
-
-Usage:
-    API_KEY=sk-... MODEL_NAME=gpt-4o python inference.py
+STRICTLY uses validator-provided API_BASE_URL and API_KEY
 """
+
 import os
-import sys
 import json
 import time
 
-# ── Config ────────────────────────────────────────────────────────────────────
-# Validator injects API_KEY and API_BASE_URL — always use these, never hardcode.
-API_BASE_URL   = os.environ.get("API_BASE_URL", "https://api.openai.com/v1")
-MODEL_NAME     = os.environ.get("MODEL_NAME", "gpt-4o")
-# Accept both API_KEY (validator) and OPENAI_API_KEY (local dev), prefer API_KEY
-OPENAI_API_KEY = os.environ.get("API_KEY") or os.environ.get("OPENAI_API_KEY", "")
-ENV_BASE_URL   = os.environ.get("ENV_BASE_URL", "http://localhost:7860")
+# ── Config ─────────────────────────────────────────────────────────────
+API_BASE_URL = os.environ["API_BASE_URL"]   # MUST use validator value
+API_KEY      = os.environ["API_KEY"]        # MUST use validator value
+MODEL_NAME   = os.environ.get("MODEL_NAME", "gpt-4o")
+ENV_BASE_URL = os.environ.get("ENV_BASE_URL", "http://localhost:7860")
 
 TASK_IDS = [
     "easy_select_optimization",
@@ -26,188 +20,145 @@ TASK_IDS = [
 ]
 
 SYSTEM_PROMPT = """You are an expert SQL engineer.
-You will be given a database schema, a slow/poorly-written SQL query, and a task description.
-Your job is to rewrite the query to be:
-1. Semantically CORRECT — it must compute exactly what the task asks
-2. EFFICIENT — eliminate redundant subqueries, use proper JOINs, GROUP BY, window functions
-3. READABLE — uppercase keywords, meaningful aliases, no SELECT *
+Rewrite the given SQL query to be:
+1. Correct
+2. Efficient
+3. Readable
 
-Respond with ONLY the rewritten SQL query, no explanation, no markdown fences."""
+Respond ONLY with SQL. No explanation.
+"""
 
 
+# ── Output Formatter (REQUIRED FORMAT) ─────────────────────────────────
 def _emit(obj: dict):
-    """Print structured output to stdout and flush immediately.
-    The validator requires lines that START with the literal token:
-      [START] task=NAME
-      [STEP]  step=N reward=R
-      [END]   task=NAME score=S steps=N
-    Extra key=value pairs are appended on the same line.
-    A JSON detail line is also emitted afterwards for debugging.
-    """
     event = obj.get("event", "")
 
     if event == "[START]":
         tasks_str = ",".join(obj.get("tasks", []))
-        print(f"[START] task={tasks_str} model={obj.get('model', '')} env_url={obj.get('env_url', '')}", flush=True)
+        print(f"[START] task={tasks_str} model={obj.get('model')} env_url={obj.get('env_url')}", flush=True)
 
     elif event == "[STEP]":
-        task_id  = obj.get("task_id", "unknown")
-        score    = obj.get("score", 0.0)
-        error    = obj.get("error", "")
-        step_num = obj.get("step", 1)
-        if error:
-            print(f"[STEP] step={step_num} task={task_id} reward={score} error={error}", flush=True)
+        if obj.get("error"):
+            print(f"[STEP] step={obj['step']} task={obj['task_id']} reward=0 error={obj['error']}", flush=True)
         else:
-            correctness = obj.get("correctness", "")
-            efficiency  = obj.get("efficiency", "")
-            style       = obj.get("style", "")
-            latency     = obj.get("latency_s", "")
             print(
-                f"[STEP] step={step_num} task={task_id} reward={score} "
-                f"correctness={correctness} efficiency={efficiency} style={style} latency_s={latency}",
+                f"[STEP] step={obj['step']} task={obj['task_id']} reward={obj['score']} "
+                f"correctness={obj['correctness']} efficiency={obj['efficiency']} "
+                f"style={obj['style']} latency_s={obj['latency_s']}",
                 flush=True,
             )
 
     elif event == "[END]":
-        scores     = obj.get("scores", {})
-        mean_score = obj.get("mean_score", 0.0)
-        n_steps    = len(scores)
-        for task_id, score in scores.items():
+        for task_id, score in obj["scores"].items():
             print(f"[END] task={task_id} score={score} steps=1", flush=True)
-        print(f"[END] task=ALL score={mean_score} steps={n_steps} model={obj.get('model', '')}", flush=True)
+        print(f"[END] task=ALL score={obj['mean_score']} steps={len(obj['scores'])}", flush=True)
 
-    elif event == "[ERROR]":
-        print(f"[ERROR] stage={obj.get('stage','')} error={obj.get('error','')}", flush=True)
-
-    # Also emit raw JSON for debugging
     print(json.dumps(obj), flush=True)
 
 
-def build_user_prompt(obs: dict) -> str:
-    hints_section = ""
-    if obs.get("hints"):
-        hints_section = "\n\nHINTS:\n" + "\n".join(f"- {h}" for h in obs["hints"])
+# ── Prompt Builder ─────────────────────────────────────────────────────
+def build_prompt(obs):
+    return f"""
+TASK:
+{obs['task_description']}
 
-    sample_section = ""
-    if obs.get("sample_data"):
-        sample_section = "\n\nSAMPLE DATA:\n"
-        for table, rows in obs["sample_data"].items():
-            sample_section += f"\n{table}:\n"
-            for row in rows[:3]:
-                sample_section += f"  {row}\n"
+SCHEMA:
+{obs['schema_ddl']}
 
-    return (
-        f"TASK: {obs['task_description']}\n\n"
-        f"SCHEMA:\n{obs['schema_ddl']}\n\n"
-        f"SLOW QUERY TO OPTIMIZE:\n{obs['slow_query']}"
-        f"{hints_section}{sample_section}\n\nRewrite this query:"
-    )
+SLOW QUERY:
+{obs['slow_query']}
+
+Rewrite this query:
+"""
 
 
-def env_reset(task_id: str) -> dict:
+# ── Environment Calls ──────────────────────────────────────────────────
+def env_reset(task_id):
     import requests
     r = requests.post(f"{ENV_BASE_URL}/reset", json={"task_id": task_id}, timeout=30)
     r.raise_for_status()
     return r.json()
 
 
-def env_step(rewritten_query: str) -> dict:
+def env_step(query):
     import requests
-    r = requests.post(f"{ENV_BASE_URL}/step", json={"rewritten_query": rewritten_query}, timeout=30)
+    r = requests.post(f"{ENV_BASE_URL}/step", json={"rewritten_query": query}, timeout=30)
     r.raise_for_status()
     return r.json()
 
 
-def run_task(client, task_id: str) -> dict:
-    obs = env_reset(task_id)
-    user_prompt = build_user_prompt(obs)
-    start = time.time()
-
-    completion = client.chat.completions.create(
-        model=MODEL_NAME,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user",   "content": user_prompt},
-        ],
-        temperature=0.0,
-        max_tokens=1024,
-    )
-    latency = round(time.time() - start, 2)
-    rewritten_query = completion.choices[0].message.content.strip()
-
-    result = env_step(rewritten_query)
-    return {
-        "task_id":         task_id,
-        "rewritten_query": rewritten_query,
-        "reward":          result["reward"],
-        "latency_s":       latency,
-    }
-
-
+# ── Main Execution ─────────────────────────────────────────────────────
 def main():
-    # ── [START] — emitted FIRST, before anything else can fail ───────────────
+    from openai import OpenAI
+
+    # ✅ STRICTLY use validator proxy
+    client = OpenAI(
+        base_url=API_BASE_URL,
+        api_key=API_KEY,
+    )
+
     _emit({
-        "event":   "[START]",
-        "model":   MODEL_NAME,
-        "tasks":   TASK_IDS,
+        "event": "[START]",
+        "model": MODEL_NAME,
+        "tasks": TASK_IDS,
         "env_url": ENV_BASE_URL,
     })
 
-    all_scores = []
+    scores = []
 
-    # ── Build OpenAI client pointed at the validator's LiteLLM proxy ─────────
-    client = None
-    try:
-        from openai import OpenAI
-        client = OpenAI(
-            base_url=API_BASE_URL,
-            api_key=OPENAI_API_KEY if OPENAI_API_KEY else "dummy-not-set",
-        )
-    except Exception as e:
-        _emit({"event": "[ERROR]", "stage": "client_init", "error": str(e)})
-        for i, task_id in enumerate(TASK_IDS, start=1):
-            _emit({"event": "[STEP]", "step": i, "task_id": task_id, "score": 0.0,
-                   "error": f"client init failed: {e}"})
-            all_scores.append(0.0)
-        _emit({
-            "event":      "[END]",
-            "scores":     {t: 0.0 for t in TASK_IDS},
-            "mean_score": 0.0,
-            "model":      MODEL_NAME,
-        })
-        return
-
-    # ── Per-task loop ─────────────────────────────────────────────────────────
     for step_num, task_id in enumerate(TASK_IDS, start=1):
         try:
-            result = run_task(client, task_id)
-            score  = result["reward"]["total"]
-            all_scores.append(score)
-            rq = result["rewritten_query"]
+            obs = env_reset(task_id)
+            prompt = build_prompt(obs)
+
+            start = time.time()
+
+            response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=[
+                    {"role": "system", "content": SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0,
+            )
+
+            latency = round(time.time() - start, 2)
+
+            query = response.choices[0].message.content.strip()
+
+            result = env_step(query)
+            reward = result["reward"]
+
+            score = reward["total"]
+            scores.append(score)
+
             _emit({
-                "event":           "[STEP]",
-                "step":            step_num,
-                "task_id":         task_id,
-                "score":           score,
-                "correctness":     result["reward"]["correctness"],
-                "efficiency":      result["reward"]["efficiency"],
-                "style":           result["reward"]["style"],
-                "latency_s":       result["latency_s"],
-                "rewritten_query": rq[:200] + "..." if len(rq) > 200 else rq,
+                "event": "[STEP]",
+                "step": step_num,
+                "task_id": task_id,
+                "score": score,
+                "correctness": reward["correctness"],
+                "efficiency": reward["efficiency"],
+                "style": reward["style"],
+                "latency_s": latency,
             })
+
         except Exception as e:
-            all_scores.append(0.0)
-            _emit({"event": "[STEP]", "step": step_num, "task_id": task_id,
-                   "score": 0.0, "error": str(e)})
+            scores.append(0.0)
+            _emit({
+                "event": "[STEP]",
+                "step": step_num,
+                "task_id": task_id,
+                "score": 0.0,
+                "error": str(e),
+            })
 
-    mean_score = round(sum(all_scores) / len(all_scores), 4) if all_scores else 0.0
+    mean_score = round(sum(scores) / len(scores), 4)
 
-    # ── [END] — always emitted ────────────────────────────────────────────────
     _emit({
-        "event":      "[END]",
-        "scores":     {tid: s for tid, s in zip(TASK_IDS, all_scores)},
+        "event": "[END]",
+        "scores": dict(zip(TASK_IDS, scores)),
         "mean_score": mean_score,
-        "model":      MODEL_NAME,
     })
 
 
